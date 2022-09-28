@@ -24,6 +24,8 @@ Tips:
         4) interEpisodeLearn (optional)
 
 """
+import os
+import sys
 import numpy as np
 
 from collections import deque
@@ -65,7 +67,13 @@ class Controller():
             verbose (bool, optional): Turn on and off additional printouts and plots.
 
         """
-        # Save environment and conrol parameters.
+        # print("*************************PRINTING STUFF*************************")
+        # print(initial_info["nominal_gates_pos_and_type"])
+        # # print(initial_info[""])
+        # print("*************************     DONE     *************************")
+        # sys.exit()
+
+        # Save environment parameters.
         self.CTRL_TIMESTEP = initial_info["ctrl_timestep"]
         self.CTRL_FREQ = initial_info["ctrl_freq"]
         self.initial_obs = initial_obs
@@ -99,6 +107,7 @@ class Controller():
             waypoints = [(self.initial_obs[0], self.initial_obs[2], initial_info["gate_dimensions"]["tall"]["height"])]  # Height is hardcoded scenario knowledge.
         else:
             waypoints = [(self.initial_obs[0], self.initial_obs[2], self.initial_obs[4])]
+
         for idx, g in enumerate(self.NOMINAL_GATES):
             height = initial_info["gate_dimensions"]["tall"]["height"] if g[6] == 0 else initial_info["gate_dimensions"]["low"]["height"]
             if g[5] > 0.75 or g[5] < 0:
@@ -137,6 +146,8 @@ class Controller():
             # Draw the trajectory on PyBullet's GUI
             draw_trajectory(initial_info, self.waypoints, self.ref_x, self.ref_y, self.ref_z)
 
+        self.is_tookoff = False
+
         #########################
         # REPLACE THIS (END) ####
         #########################
@@ -172,12 +183,24 @@ class Controller():
 
         iteration = int(time*self.CTRL_FREQ)
 
+        command_type = Command(0)
+        args = []
+
+        # if obs[4] > .9:
+        #     # command_type = Command(5)
+        #     # args = [[0, 0, 1], 0, 2, False]
+        #     command_type = Command(0)
+        #     args = []
+        #     return command_type, args
+
         #########################
         # REPLACE THIS (START) ##
         #########################
 
-        # Handwritten solution for GitHub's getting_stated scenario.
+        if not self.is_tookoff and obs[4] > .9:
+            self.is_tookoff = True
 
+        # Handwritten solution for GitHub's example scenario.
         if iteration == 0:
             height = 1
             duration = 2
@@ -185,55 +208,73 @@ class Controller():
             command_type = Command(2)  # Take-off.
             args = [height, duration]
 
-        elif iteration >= 3*self.CTRL_FREQ and iteration < 20*self.CTRL_FREQ:
-            step = min(iteration-3*self.CTRL_FREQ, len(self.ref_x) -1)
-            target_pos = np.array([self.ref_x[step], self.ref_y[step], self.ref_z[step]])
+        elif self.is_tookoff and iteration < len(self.ref_x):
+            target_pos = np.array([
+                self.ref_x[iteration], self.ref_y[iteration], self.ref_z[iteration]
+            ])
             target_vel = np.zeros(3)
             target_acc = np.zeros(3)
-            target_yaw = 0.
+            target_yaw = 0
             target_rpy_rates = np.zeros(3)
 
-            command_type = Command(1)  # cmdFullState.
+            # command_type = Command(5)
+            # args = [target_pos, 0, self.CTRL_FREQ, False]
+            command_type = Command(1)
             args = [target_pos, target_vel, target_acc, target_yaw, target_rpy_rates]
 
-        elif iteration == 20*self.CTRL_FREQ:
-            command_type = Command(6)  # notify setpoint stop.
-            args = []
 
-        elif iteration == 20*self.CTRL_FREQ+1:
-            x = self.ref_x[-1]
-            y = self.ref_y[-1]
-            z = 1.5 
-            yaw = 0.
-            duration = 2.5
+        # if iteration == 0:
+        #     height = 1
+        #     duration = 2
 
-            command_type = Command(5)  # goTo.
-            args = [[x, y, z], yaw, duration, False]
+        #     command_type = Command(2)  # Take-off.
+        #     args = [height, duration]
 
-        elif iteration == 23*self.CTRL_FREQ:
-            x = self.initial_obs[0]
-            y = self.initial_obs[2]
-            z = 1.5
-            yaw = 0.
-            duration = 6
+        # elif iteration >= 3*self.CTRL_FREQ and iteration < 20*self.CTRL_FREQ:
+        #     step = min(iteration-3*self.CTRL_FREQ, len(self.ref_x) -1)
+        #     target_pos = np.array([self.ref_x[step], self.ref_y[step], self.ref_z[step]])
+        #     target_vel = np.zeros(3)
+        #     target_acc = np.zeros(3)
+        #     target_yaw = 0.
+        #     target_rpy_rates = np.zeros(3)
 
-            command_type = Command(5)  # goTo.
-            args = [[x, y, z], yaw, duration, False]
+        #     command_type = Command(1)  # cmdFullState.
+        #     args = [target_pos, target_vel, target_acc, target_yaw, target_rpy_rates]
 
-        elif iteration == 30*self.CTRL_FREQ:
-            height = 0.
-            duration = 3
+        # elif iteration == 20*self.CTRL_FREQ:
+        #     command_type = Command(6)  # notify setpoint stop.
+        #     args = []
 
-            command_type = Command(3)  # Land.
-            args = [height, duration]
+        # elif iteration == 20*self.CTRL_FREQ+1:
+        #     x = self.ref_x[-1]
+        #     y = self.ref_y[-1]
+        #     z = 1.5 
+        #     yaw = 0.
+        #     duration = 2.5
 
-        elif iteration == 33*self.CTRL_FREQ-1:
-            command_type = Command(-1)  # Terminate command to be sent once trajectory is completed.
-            args = []
+        #     command_type = Command(5)  # goTo.
+        #     args = [[x, y, z], yaw, duration, False]
 
-        else:
-            command_type = Command(0)  # None.
-            args = []
+        # elif iteration == 23*self.CTRL_FREQ:
+        #     x = self.initial_obs[0]
+        #     y = self.initial_obs[2]
+        #     z = 1.5
+        #     yaw = 0.
+        #     duration = 6
+
+        #     command_type = Command(5)  # goTo.
+        #     args = [[x, y, z], yaw, duration, False]
+
+        # elif iteration == 30*self.CTRL_FREQ:
+        #     height = 0.
+        #     duration = 3
+
+        #     command_type = Command(3)  # Land.
+        #     args = [height, duration]
+
+        # else:
+        #     command_type = Command(0)  # None.
+        #     args = []
 
         #########################
         # REPLACE THIS (END) ####
