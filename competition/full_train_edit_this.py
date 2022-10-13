@@ -26,7 +26,13 @@ Tips:
 """
 import os
 import sys
+import math as m
 import numpy as np
+import numpy.matlib
+import pandas as pd
+import astar2D as ass
+import networkx as nx
+from scipy.interpolate import interp1d
 
 from collections import deque
 
@@ -51,6 +57,34 @@ except ImportError:
     )
 
 
+def posToMap(pos, origin, omap, res):
+    mapPos = np.round((pos - origin) / res)
+    return mapPos
+
+
+def mapToPos(coord, origin, res):
+    pos = coord * res + origin
+    return pos
+
+
+def dist(a, b):
+    x1, y1 = a
+    x2, y2 = b
+    return ((x1 - x2) ** 2 + (y1 - y2) ** 2) ** 0.5
+
+
+def min_jerk(xi, xf, t):
+    d = t[-1]
+    N = len(t)
+    a = np.matlib.repmat((xf - xi), N, 1)
+    bval = np.matlib.repmat(
+        10 * (t / d) ** 3 - 15 * (t / d) ** 4 + 6 * (t / d) ** 5, 3, 1
+    )
+    bval = np.transpose(bval)
+    output = np.matlib.repmat(xi, N, 1) + a * bval
+    return output
+
+
 class Controller:
     """Template controller class."""
 
@@ -61,6 +95,10 @@ class Controller:
         use_firmware: bool = False,
         buffer_size: int = 100,
         verbose: bool = False,
+        env_num: int = 0,
+        train: bool = True,
+        trainer=None,
+        train_count: int = 0,
     ):
         """Initialization of the controller.
 
@@ -80,11 +118,15 @@ class Controller:
             verbose (bool, optional): Turn on and off additional printouts and plots.
 
         """
-        # print("*************************PRINTING STUFF*************************")
-        # print(initial_info["nominal_gates_pos_and_type"])
-        # # print(initial_info[""])
-        # print("*************************     DONE     *************************")
-        # sys.exit()
+
+        self.model = trainer
+        self.is_train_data = train
+        self.epsilon = min(float(train_count)*.25, 6.0)
+
+        self.data = []
+        self.df = None
+        self.current_goal = 0
+        self.env_num = env_num
 
         # Save environment parameters.
         self.CTRL_TIMESTEP = initial_info["ctrl_timestep"]
@@ -92,6 +134,9 @@ class Controller:
         self.initial_obs = initial_obs
         self.VERBOSE = verbose
         self.BUFFER_SIZE = buffer_size
+
+        self.final_goal = initial_info["stabilization_goal"]
+        self.goal_tolerance = initial_info["stabilization_goal_tolerance"]
 
         # Store a priori scenario information.
         self.NOMINAL_GATES = initial_info["nominal_gates_pos_and_type"]
@@ -112,10 +157,43 @@ class Controller:
         self.interEpisodeReset()
 
         #########################
+        ###### ASTAR STUFF ######
+        #########################
+        mapSize = 60
+        omap = np.zeros((mapSize, mapSize))
+        inflate = 1  # Use this to inflate obstacles
+        gflate = 3  # Use this to inflate gates
+        angleFlate = m.pi / 8
+        # print(self.initial_obs)
+        # position = np.array([self.initial_obs[i] for i in (0,2,4)])
+        position = np.array([self.initial_obs[0], self.initial_obs[2], 1])
+        res = 0.15
+        origin = np.array([0 - mapSize / 2 * res, 0 - mapSize / 2 * res])
+        posMap = posToMap(position[:2], origin, omap, res)
+        obstacles = np.array(self.NOMINAL_OBSTACLES)
+        gates = np.array(self.NOMINAL_GATES)
+        # Put obs on map
+        omap = ass.put_obs_on_map(obstacles, omap, origin, res, inflate, mapSize)
+        # Put gates on map
+        print(gates)
+        print(omap)
+        print(gflate)
+        print(angleFlate)
+        print(origin)
+        print(res)
+        omap, goalList = ass.inflate_gates(gates, omap, gflate, angleFlate, origin, res)
+        # get all obstacle positions
+        # Identify edges (LONGEST PART OF CODE)
+        vertices = np.array([[x, y] for x in range(mapSize) for y in range(mapSize)])
+        visEdges = ass.edge_creation(vertices, omap)
+        G = nx.from_pandas_edgelist(
+            visEdges, source="Source", target="Target", edge_attr="Weight"
+        )
+
+        #########################
         # REPLACE THIS (START) ##
         #########################
 
-        # Example: harcode waypoints through the gates.
         if use_firmware:
             waypoints = [
                 (
@@ -129,63 +207,68 @@ class Controller:
                 (self.initial_obs[0], self.initial_obs[2], self.initial_obs[4])
             ]
 
-        for idx, g in enumerate(self.NOMINAL_GATES):
+        waypoints = list([position[:2]])
+        waypoints3D = list([position[:3]])
+        mapPath = list([posMap])
+        print(waypoints3D)
+        for idx, g in enumerate(gates):
+            startPos = np.array(waypoints[-1])
+            start3D = np.array(waypoints3D[-1])
+            posMap = posToMap(startPos, origin, omap, res)
+            start = tuple(np.array(posMap, dtype=int))
             height = (
                 initial_info["gate_dimensions"]["tall"]["height"]
                 if g[6] == 0
                 else initial_info["gate_dimensions"]["low"]["height"]
             )
-            if g[5] > 0.75 or g[5] < 0:
-                if (
-                    idx == 2
-                ):  # Hardcoded scenario knowledge (direction in which to take gate 2).
-                    waypoints.append((g[0] + 0.3, g[1] - 0.3, height))
-                    waypoints.append((g[0] - 0.3, g[1] - 0.3, height))
-                else:
-                    waypoints.append((g[0] - 0.3, g[1], height))
-                    waypoints.append((g[0] + 0.3, g[1], height))
-            else:
-                if (
-                    idx == 3
-                ):  # Hardcoded scenario knowledge (correct how to take gate 3).
-                    waypoints.append((g[0] + 0.1, g[1] - 0.3, height))
-                    waypoints.append((g[0] + 0.1, g[1] + 0.3, height))
-                else:
-                    waypoints.append((g[0], g[1] - 0.3, height))
-                    waypoints.append((g[0], g[1] + 0.3, height))
-        waypoints.append(
-            [
-                initial_info["x_reference"][0],
-                initial_info["x_reference"][2],
-                initial_info["x_reference"][4],
-            ]
+            # if g[5] > 0.75 or g[5] < 0:
+            goal = np.array(g[:2])
+            goal3D = np.concatenate([g[:2], [height]])
+            goalMap = posToMap(goal, origin, omap, res)
+            end = tuple(np.array(goalMap, dtype=int))
+
+            path = nx.astar_path(G, start, end, weight="Weight")
+            # path = nx.shortest_path(G,start,end,'Weight')
+            arrPath = np.array(path)
+
+            arrPath = arrPath[1:]
+            pathPos = np.array([mapToPos(row, origin, res) for row in arrPath])
+            pathPos[0] = startPos
+            pathPos[-1] = goal
+
+            pathPos3D = np.array([np.concatenate([row, [0]]) for row in pathPos])
+            zInterp = np.linspace(start3D[-1], goal3D[-1], len(pathPos3D))
+            pathPos3D[:, -1] = zInterp
+            pathPos3D[0] = start3D
+            pathPos3D[-1] = goal3D
+            print(pathPos3D)
+            waypoints.extend(pathPos[:-1])
+            waypoints3D.extend(pathPos3D[:-1])
+            mapPath.extend(arrPath)
+        waypoints3D.extend([goal3D])
+
+        waypts = np.array(waypoints3D[1:])
+        allTraj = [0, 0, 0]
+        freq = 1.0 / self.CTRL_FREQ
+        move_time = 0.3
+        t = np.arange(0, move_time, freq)
+        for idx in range(waypts.shape[0] - 1):
+            start = waypts[idx]
+            end = waypts[idx + 1]
+            traj = min_jerk(start, end, t)
+            allTraj = np.vstack([allTraj, traj])
+        allTraj = allTraj[1:]
+        self.waypoints = waypts
+        self.ref_x = allTraj[:, 0]
+        self.ref_y = allTraj[:, 1]
+        self.ref_z = allTraj[:, 2]
+        t_scaled = np.linspace(0, len(waypts), len(allTraj))
+
+        # Draw the trajectory on PyBullet's GUI
+        draw_trajectory(
+            initial_info, self.waypoints, self.ref_x, self.ref_y, self.ref_z
         )
-
-        # Polynomial fit
-        self.waypoints = np.array(waypoints)
-        deg = 6
-        t = np.arange(self.waypoints.shape[0])
-        fx = np.poly1d(np.polyfit(t, self.waypoints[:, 0], deg))
-        fy = np.poly1d(np.polyfit(t, self.waypoints[:, 1], deg))
-        fz = np.poly1d(np.polyfit(t, self.waypoints[:, 2], deg))
-        duration = 15
-        t_scaled = np.linspace(t[0], t[-1], int(duration * self.CTRL_FREQ))
-        self.ref_x = fx(t_scaled)
-        self.ref_y = fy(t_scaled)
-        self.ref_z = fz(t_scaled)
-
-        if self.VERBOSE:
-            # Plot trajectory in each dimension and 3D.
-            plot_trajectory(
-                t_scaled, self.waypoints, self.ref_x, self.ref_y, self.ref_z
-            )
-
-            # Draw the trajectory on PyBullet's GUI
-            draw_trajectory(
-                initial_info, self.waypoints, self.ref_x, self.ref_y, self.ref_z
-            )
-
-        self.is_tookoff = False
+        self.step = 0
 
         #########################
         # REPLACE THIS (END) ####
@@ -217,23 +300,14 @@ class Controller:
             )
 
         iteration = int(time * self.CTRL_FREQ)
+        self.step = iteration
 
         command_type = Command(0)
         args = []
 
-        # if obs[4] > .9:
-        #     # command_type = Command(5)
-        #     # args = [[0, 0, 1], 0, 2, False]
-        #     command_type = Command(0)
-        #     args = []
-        #     return command_type, args
-
         #########################
         # REPLACE THIS (START) ##
         #########################
-
-        if not self.is_tookoff and obs[4] > 0.9:
-            self.is_tookoff = True
 
         # Handwritten solution for GitHub's example scenario.
         if iteration == 0:
@@ -243,12 +317,33 @@ class Controller:
             command_type = Command(2)  # Take-off.
             args = [height, duration]
 
-        elif self.is_tookoff and iteration < len(self.ref_x):
-            target_pos = np.array(
-                [self.ref_x[iteration], self.ref_y[iteration], self.ref_z[iteration]]
-            )
-            target_vel = np.zeros(3)
-            target_acc = np.zeros(3)
+        elif iteration < len(self.ref_x):
+
+            pos = np.array([obs[0], obs[1], obs[2]])
+            old_target = [
+                self.ref_x[iteration - 1],
+                self.ref_y[iteration - 1],
+                self.ref_z[iteration - 1],
+            ]
+
+            if np.linalg.norm(pos - old_target) < self.epsilon:
+                dat = self.generate_data(obs)
+                print(dat)
+                sys.exit()
+                target_pos = self.model
+                target_vel = np.zeros(3)
+                target_acc = np.zeros(3)
+            else:
+                target_pos = np.array(
+                    [
+                        self.ref_x[iteration],
+                        self.ref_y[iteration],
+                        self.ref_z[iteration],
+                    ]
+                )
+                target_vel = np.zeros(3)
+                target_acc = np.zeros(3)
+
             target_yaw = 0
             target_rpy_rates = np.zeros(3)
 
@@ -256,59 +351,6 @@ class Controller:
             # args = [target_pos, 0, self.CTRL_FREQ, False]
             command_type = Command(1)
             args = [target_pos, target_vel, target_acc, target_yaw, target_rpy_rates]
-
-        # if iteration == 0:
-        #     height = 1
-        #     duration = 2
-
-        #     command_type = Command(2)  # Take-off.
-        #     args = [height, duration]
-
-        # elif iteration >= 3*self.CTRL_FREQ and iteration < 20*self.CTRL_FREQ:
-        #     step = min(iteration-3*self.CTRL_FREQ, len(self.ref_x) -1)
-        #     target_pos = np.array([self.ref_x[step], self.ref_y[step], self.ref_z[step]])
-        #     target_vel = np.zeros(3)
-        #     target_acc = np.zeros(3)
-        #     target_yaw = 0.
-        #     target_rpy_rates = np.zeros(3)
-
-        #     command_type = Command(1)  # cmdFullState.
-        #     args = [target_pos, target_vel, target_acc, target_yaw, target_rpy_rates]
-
-        # elif iteration == 20*self.CTRL_FREQ:
-        #     command_type = Command(6)  # notify setpoint stop.
-        #     args = []
-
-        # elif iteration == 20*self.CTRL_FREQ+1:
-        #     x = self.ref_x[-1]
-        #     y = self.ref_y[-1]
-        #     z = 1.5
-        #     yaw = 0.
-        #     duration = 2.5
-
-        #     command_type = Command(5)  # goTo.
-        #     args = [[x, y, z], yaw, duration, False]
-
-        # elif iteration == 23*self.CTRL_FREQ:
-        #     x = self.initial_obs[0]
-        #     y = self.initial_obs[2]
-        #     z = 1.5
-        #     yaw = 0.
-        #     duration = 6
-
-        #     command_type = Command(5)  # goTo.
-        #     args = [[x, y, z], yaw, duration, False]
-
-        # elif iteration == 30*self.CTRL_FREQ:
-        #     height = 0.
-        #     duration = 3
-
-        #     command_type = Command(3)  # Land.
-        #     args = [height, duration]
-
-        # else:
-        #     command_type = Command(0)  # None.
-        #     args = []
 
         #########################
         # REPLACE THIS (END) ####
@@ -342,6 +384,7 @@ class Controller:
             )
 
         iteration = int(time * self.CTRL_FREQ)
+        self.step = iteration
 
         #########################
         if iteration < len(self.ref_x):
@@ -354,6 +397,111 @@ class Controller:
         #########################
 
         return target_p, target_v
+
+    def generate_data(self, obs):
+        if self.step > len(self.ref_x) - 5:
+            return None
+
+        end = min(self.step + 10, len(self.ref_x))
+        future_poses = [
+            self.ref_x[self.step : end],
+            self.ref_y[self.step : end],
+            self.ref_z[self.step : end],
+        ]
+
+        if self.step > len(self.ref_x) - 10:
+            future_poses[0] = np.pad(
+                future_poses[0], (0, 10 - (len(self.ref_x) - self.step)), mode="edge"
+            )
+            future_poses[1] = np.pad(
+                future_poses[1], (0, 10 - (len(self.ref_y) - self.step)), mode="edge"
+            )
+            future_poses[2] = np.pad(
+                future_poses[2], (0, 10 - (len(self.ref_z) - self.step)), mode="edge"
+            )
+
+        quad_pos = np.array([obs[0], obs[2], obs[4]])
+        curr_goal = None
+
+        if self.current_goal < len(self.NOMINAL_GATES):
+            curr_goal = self.NOMINAL_GATES[self.current_goal][:6]
+        else:
+            curr_goal = [
+                self.final_goal[0],
+                self.final_goal[1],
+                self.final_goal[2],
+                0,
+                0,
+                0,
+            ]
+
+        if np.linalg.norm(quad_pos - np.array(curr_goal[:3])) < self.goal_tolerance:
+            self.current_goal += 1
+
+        if self.current_goal < len(self.NOMINAL_GATES):
+            curr_goal = self.NOMINAL_GATES[self.current_goal][:6]
+        else:
+            curr_goal = [
+                self.final_goal[0],
+                self.final_goal[1],
+                self.final_goal[2],
+                0,
+                0,
+                0,
+            ]
+
+        obstacle_list = self.NOMINAL_OBSTACLES
+        obstacle_list = [[ob[0], ob[1]] for ob in obstacle_list]
+
+        while len(obstacle_list) < 10:
+            obstacle_list.append([-10000, -10000])
+
+        obstacle_list = np.array(obstacle_list)
+        obstacle_dists = np.linalg.norm(quad_pos[:2] - obstacle_list, axis=1)
+        obstacle_list = obstacle_list[np.argsort(obstacle_dists)]
+
+        rot_mat = euler2Mat(obs[6], obs[7], obs[8])
+        rot_mat_flat = rot_mat.flatten()
+        vel = np.array([obs[1], obs[3], obs[5]])
+        err_trans = np.array(curr_goal[:3]) - quad_pos
+        err_rot = angleBetweenMats(
+            rot_mat, euler2Mat(curr_goal[3], curr_goal[4], curr_goal[5])
+        )
+
+        step_data_dir = {
+            "vel_x": vel[0],
+            "vel_y": vel[1],
+            "vel_z": vel[2],
+            "R_0": rot_mat_flat[0],
+            "R_1": rot_mat_flat[1],
+            "R_2": rot_mat_flat[2],
+            "R_3": rot_mat_flat[3],
+            "R_4": rot_mat_flat[4],
+            "R_5": rot_mat_flat[5],
+            "R_6": rot_mat_flat[6],
+            "R_7": rot_mat_flat[7],
+            "R_8": rot_mat_flat[8],
+            "err_x": err_trans[0],
+            "err_y": err_trans[1],
+            "err_z": err_trans[2],
+            "err_theta": err_rot,
+        }
+
+        axes = ["x", "y", "z"]
+        for i, ob in enumerate(obstacle_list):
+
+            if i > 9:
+                break
+
+            for j, val in enumerate(ob):
+                step_data_dir[f"obs_{i}_{axes[j]}"] = val
+
+        for m in range(3):
+            for i in range(10):
+                for ind, ax in enumerate(axes):
+                    step_data_dir[f"traj{m}_{i}{ax}"] = future_poses[ind][i]
+
+        return step_data_dir
 
     @timing_step
     def interStepLearn(self, action, obs, reward, done, info):
@@ -383,22 +531,11 @@ class Controller:
         #########################
         # REPLACE THIS (START) ##
         #########################
-        obstacle_list = np.array(self.NOMINAL_OBSTACLES)
-        obstacle_list = obstacle_list[:, :2]
-        obstacle_dists = np.linalg.norm([obs[0], obs[2]] - obstacle_list, axis=1)
 
-        obstacle_list = obstacle_list[np.argsort(obstacle_dists)]
+        dat = self.generate_data(obs)
 
-        final_obstacle_list = []
-
-        while len(final_obstacle_list) < 10:
-
-            if len(final_obstacle_list) < len(obstacle_list):
-                final_obstacle_list.append(obstacle_list[len(final_obstacle_list)])
-            else:
-                final_obstacle_list.append([-10000, -10000])
-
-        final_obstacle_list = np.array(final_obstacle_list)
+        if dat != None:
+            self.data.append(dat)
 
         #########################
         # REPLACE THIS (END) ####
@@ -424,6 +561,11 @@ class Controller:
         _ = self.reward_buffer
         _ = self.done_buffer
         _ = self.info_buffer
+
+        self.df = pd.DataFrame(self.data)
+        # self.df.index.name="steps"
+        train_str = "train" if self.is_train_data else "val"
+        self.df.to_csv(f"./planner_model/data/{train_str}/env_{self.env_num}.dat")
 
         #########################
         # REPLACE THIS (END) ####
@@ -456,3 +598,33 @@ class Controller:
         self.interstep_learning_time = 0
         self.interstep_learning_occurrences = 0
         self.interepisode_learning_time = 0
+
+
+def euler2Mat(roll, pitch, yaw):
+
+    R_theta = np.array(
+        [[1, 0, 0], [0, np.cos(roll), -np.sin(roll)], [0, np.sin(roll), np.cos(roll)]]
+    )
+
+    R_pitch = np.array(
+        [
+            [np.cos(pitch), 0, np.sin(pitch)],
+            [0, 1, 0],
+            [-np.sin(pitch), 0, np.cos(pitch)],
+        ]
+    )
+
+    R_yaw = np.array(
+        [[np.cos(yaw), -np.sin(yaw), 0], [np.sin(yaw), np.cos(yaw), 0], [0, 0, 1]]
+    )
+
+    R_mat = np.matmul(R_theta, np.matmul(R_pitch, R_yaw))
+
+    return R_mat
+
+
+# Courtesy of https://math.stackexchange.com/questions/2113634/comparing-two-rotation-matrices
+def angleBetweenMats(P, Q):
+    R = np.dot(P, Q.T)
+    theta = (np.trace(R) - 1) / 2
+    return np.arccos(theta)
