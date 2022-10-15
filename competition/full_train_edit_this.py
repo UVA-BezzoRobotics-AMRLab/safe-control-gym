@@ -32,9 +32,10 @@ import numpy.matlib
 import pandas as pd
 import astar2D as ass
 import networkx as nx
-from scipy.interpolate import interp1d
+import tensorflow as tf
 
 from collections import deque
+from scipy.interpolate import interp1d
 
 try:
     from competition_utils import (
@@ -308,7 +309,6 @@ class Controller:
         #########################
         # REPLACE THIS (START) ##
         #########################
-
         # Handwritten solution for GitHub's example scenario.
         if iteration == 0:
             height = 1
@@ -326,10 +326,13 @@ class Controller:
                 self.ref_z[iteration - 1],
             ]
 
-            if np.linalg.norm(pos - old_target) < self.epsilon:
+            if np.linalg.norm(pos - old_target) < self.epsilon+100:
                 dat = self.generate_data(obs)
-                print(dat)
-                sys.exit()
+                data_list = [dat[key] for key in dat.keys()]
+                all_data = data_list[:36]
+                all_data = tf.expand_dims(tf.stack([all_data, all_data, all_data]), axis=0)
+                inputs = {"state": all_data[:,:,:16], "env":all_data[:,:,16:]}
+                output = self.model.inference(inputs)
                 target_pos = self.model
                 target_vel = np.zeros(3)
                 target_acc = np.zeros(3)

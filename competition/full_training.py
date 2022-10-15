@@ -536,7 +536,12 @@ if __name__ == "__main__":
     train_counter = 0
     seeds = np.random.randint(0, 1000, size=[val_envs + train_envs])
     trainer = TrajectoryTrainer()
+    # trainer.built = True
 
+    fake_inputs = {'state': np.zeros([1,3,16]), 'env': np.zeros([1,3,20])}
+    trainer.network(fake_inputs)
+
+    trainer.network.load_weights("./train/ckpt-1.data-00000-of-00001")
     for i in range(val_envs):
         print(f"VALIDATION WORLD {i}")
         run(
